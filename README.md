@@ -1,22 +1,22 @@
 # Gimertificator
 Gimertificator is tool for remind about giltab merge requests to slack
 
-##Install
+## Install
 ```shell script
 go get -u https://github.com/vortgo/gimretificator
 ```
-##Preconditions
+## Preconditions
 
 * Gitlab [access token](https://docs.gitlab.com/ee/user/profile/personal_access_tokens.html)  
 * Slack [webhook url](https://api.slack.com/messaging/webhooks)
 
-##Show run options
+## Show run options
 
 ```shell script
 gimertificator -h
 ```
 
-##Usage
+## Usage
 
 ```shell script
 gimertificator  -token={your gitlab token} -slackWebhookUrl={yout slack webhook url}
