@@ -3,7 +3,7 @@ Gimertificator is tool for remind about giltab merge requests to slack
 
 ## Install
 ```shell script
-go get -u github.com/vortgo/gimretificator
+go get -u github.com/vortgo/gimertificator
 ```
 ## Preconditions
 
