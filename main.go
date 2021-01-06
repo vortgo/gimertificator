@@ -118,7 +118,11 @@ func createNotifyMessage(mergeRequests []*gitlab.MergeRequest) string {
 		},
 	}
 
-	t, err := template.New("notification.tpl").Funcs(funcMap).ParseFiles("notification.tpl")
+	t, err := template.New("notification").Funcs(funcMap).Parse(`
+{{ .MrsCount }} merge requests waiting for your approval
+
+{{range .MergeRequests}}
+<{{.WebURL}}|{{.Title}}> ({{.Author.Username}}) - {{.UpdatedAt|dateDelta}} days {{end}}`)
 
 	if err != nil {
 		log.Fatalf("Failed to load template for notification: %v", err)
