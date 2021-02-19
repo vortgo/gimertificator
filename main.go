@@ -56,7 +56,7 @@ func main() {
 	opt := &gitlab.ListMergeRequestsOptions{
 		ListOptions: gitlab.ListOptions{Page: page, PerPage: perPage},
 		State:       pointer.ToString("opened"),
-		OrderBy:     pointer.ToString("updated_at"),
+		OrderBy:     pointer.ToString("created_at"),
 		Scope:       pointer.ToString("all"),
 		WIP:         pointer.ToString("no"),
 	}
@@ -68,7 +68,7 @@ func main() {
 
 	var mrForNotify []*gitlab.MergeRequest
 	for _, mr := range mrs {
-		deltaDuration := time.Now().Sub(pointer.GetTime(mr.UpdatedAt))
+		deltaDuration := time.Now().Sub(pointer.GetTime(mr.CreatedAt))
 		if deltaDuration.Hours() > float64(mrTimeoutInHours) {
 			mrForNotify = append(mrForNotify, mr)
 		}
@@ -112,8 +112,8 @@ func createNotifyMessage(mergeRequests []*gitlab.MergeRequest) string {
 	}
 
 	funcMap := template.FuncMap{
-		"dateDelta": func(updatedAt time.Time) string {
-			deltaDuration := time.Now().Sub(updatedAt)
+		"dateDelta": func(createdAt time.Time) string {
+			deltaDuration := time.Now().Sub(createdAt)
 			return strconv.Itoa(int(deltaDuration.Hours() / 24))
 		},
 	}
@@ -122,7 +122,7 @@ func createNotifyMessage(mergeRequests []*gitlab.MergeRequest) string {
 {{ .MrsCount }} merge requests waiting for your approval
 
 {{range .MergeRequests}}
-<{{.WebURL}}|{{.Title}}> ({{.Author.Username}}) - {{.UpdatedAt|dateDelta}} days {{end}}`)
+<{{.WebURL}}|{{.Title}}> ({{.Author.Username}}) - {{.CreatedAt|dateDelta}} days {{end}}`)
 
 	if err != nil {
 		log.Fatalf("Failed to load template for notification: %v", err)
