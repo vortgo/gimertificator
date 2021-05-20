@@ -2,14 +2,13 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"flag"
-	"fmt"
 	"github.com/AlekSi/pointer"
+	"github.com/slack-go/slack"
 	"github.com/xanzy/go-gitlab"
+	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"log"
-	"net/http"
 	"strconv"
 	"text/template"
 	"time"
@@ -18,8 +17,6 @@ import (
 const (
 	page    = 1
 	perPage = 1000
-
-	slackResponseOk = "ok"
 )
 
 type NotificationTemplateData struct {
@@ -32,77 +29,63 @@ func main() {
 		err              error
 		token            string
 		gitlabApiUrl     string
-		slackWebhookUrl  string
 		mrTimeoutInHours int
+		slackApiToken    string
+		configFilePath   string
 	)
 	flag.StringVar(&token, "token", "", "Token for gitlab api")
 	flag.StringVar(&gitlabApiUrl, "gitlabApiUrl", "https://gitlab.com/api/v4", "Gitlab api url")
-	flag.StringVar(&slackWebhookUrl, "slackWebhookUrl", "", "Slack webhook URL for notification")
+	flag.StringVar(&slackApiToken, "slackApiToken", "", "Slack Api Token")
+	flag.StringVar(&configFilePath, "configFilePath", "./config.yml", "Config File Path")
 	flag.IntVar(&mrTimeoutInHours, "mrTimeoutInHours", 72, "Timeout for merge requests in hours")
 	flag.Parse()
 
 	if len(token) == 0 {
 		log.Fatal("Set a valid token via run options")
 	}
-	if len(slackWebhookUrl) == 0 {
-		log.Fatal("Set a valid slackWebhookUrl via run options")
+	if len(slackApiToken) == 0 {
+		log.Fatal("Set a valid slackApiToken via run options")
 	}
 
-	git, err := gitlab.NewClient(token, gitlab.WithBaseURL(gitlabApiUrl))
+	gitClient, err := gitlab.NewClient(token, gitlab.WithBaseURL(gitlabApiUrl))
 	if err != nil {
 		log.Fatalf("Failed to create gitlab api client: %v", err)
 	}
 
-	opt := &gitlab.ListMergeRequestsOptions{
-		ListOptions: gitlab.ListOptions{Page: page, PerPage: perPage},
-		State:       pointer.ToString("opened"),
-		OrderBy:     pointer.ToString("created_at"),
-		Scope:       pointer.ToString("all"),
-		WIP:         pointer.ToString("no"),
-	}
-
-	mrs, _, err := git.MergeRequests.ListMergeRequests(opt)
+	mrs := getMergeRequest(err, gitClient)
 	if err != nil {
 		log.Fatalf("Failed to get list of merge reqursts: %v", err)
 	}
 
-	var mrForNotify []*gitlab.MergeRequest
-	for _, mr := range mrs {
-		deltaDuration := time.Now().Sub(pointer.GetTime(mr.CreatedAt))
-		if deltaDuration.Hours() > float64(mrTimeoutInHours) {
-			mrForNotify = append(mrForNotify, mr)
-		}
-	}
-
-	if len(mrForNotify) == 0 {
+	var mrsForNotify = filterMrForNotify(mrs, mrTimeoutInHours)
+	if len(mrsForNotify) == 0 {
 		log.Println("There are not merge requests for notify")
 		return
 	}
 
-	message := createNotifyMessage(mrForNotify)
+	mergeRequestsForUsers := shareMergeRequestsAmongUsers(gitClient, mrsForNotify)
 
-	values := map[string]string{"text": message}
-	jsonValue, err := json.Marshal(values)
-	if err != nil {
-		log.Fatal("Error occurred while make json body for notification request")
+	var mapOfUsers map[string]string
+
+	fileData, _ := ioutil.ReadFile(configFilePath)
+	if err := yaml.Unmarshal(fileData, &mapOfUsers); err != nil {
+		log.Panic(err)
 	}
 
-	resp, err := http.Post(slackWebhookUrl, "application/json", bytes.NewBuffer(jsonValue))
-	if err != nil {
-		log.Fatalf("Failed to make notification request: %v", err)
+	api := slack.New(slackApiToken)
+
+	for gitlabUsername, userNotifyId := range mapOfUsers {
+		if _, ok := mergeRequestsForUsers[gitlabUsername]; !ok {
+			continue
+		}
+
+		message := createNotifyMessage(mergeRequestsForUsers[gitlabUsername])
+
+		_, _, err = api.PostMessage(userNotifyId, slack.MsgOptionText(message, false))
+		if err != nil {
+			log.Fatalf("Failed to send request to slack: %v", err)
+		}
 	}
-
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatalf("Error occurred while read response from slack: %v", err)
-	}
-
-	if string(body) == slackResponseOk {
-		log.Println(fmt.Sprintf("Syccessfully notificated about %d merge requests", len(mrForNotify)))
-	}
-
 }
 
 func createNotifyMessage(mergeRequests []*gitlab.MergeRequest) string {
@@ -120,7 +103,6 @@ func createNotifyMessage(mergeRequests []*gitlab.MergeRequest) string {
 
 	t, err := template.New("notification").Funcs(funcMap).Parse(`
 {{ .MrsCount }} merge requests waiting for your approval
-
 {{range .MergeRequests}}
 <{{.WebURL}}|{{.Title}}> ({{.Author.Username}}) - {{.CreatedAt|dateDelta}} days {{end}}`)
 
@@ -133,4 +115,87 @@ func createNotifyMessage(mergeRequests []*gitlab.MergeRequest) string {
 		log.Fatalf("Failed to render template for notification: %v", err)
 	}
 	return writer.String()
+}
+
+func getMergeRequest(err error, git *gitlab.Client) []*gitlab.MergeRequest {
+	opt := &gitlab.ListMergeRequestsOptions{
+		ListOptions: gitlab.ListOptions{Page: page, PerPage: perPage},
+		State:       pointer.ToString("opened"),
+		OrderBy:     pointer.ToString("created_at"),
+		Scope:       pointer.ToString("all"),
+		WIP:         pointer.ToString("no"),
+	}
+
+	mrs, _, err := git.MergeRequests.ListMergeRequests(opt)
+	return mrs
+}
+
+func filterMrForNotify(mrs []*gitlab.MergeRequest, mrTimeoutInHours int) []*gitlab.MergeRequest {
+	var mrForNotify []*gitlab.MergeRequest
+	for _, mr := range mrs {
+		deltaDuration := time.Now().Sub(pointer.GetTime(mr.CreatedAt))
+		if deltaDuration.Hours() > float64(mrTimeoutInHours) {
+			mrForNotify = append(mrForNotify, mr)
+		}
+	}
+
+	return mrForNotify
+}
+
+func shareMergeRequestsAmongUsers(git *gitlab.Client, mrs []*gitlab.MergeRequest) map[string][]*gitlab.MergeRequest {
+	var usersMergeRequests = make(map[string][]*gitlab.MergeRequest)
+
+	for _, currentMr := range mrs {
+		approvers, _, err := git.MergeRequests.GetMergeRequestApprovals(currentMr.ProjectID, currentMr.IID)
+
+		if err != nil {
+			log.Fatalf("Failed to get merge request approvals: %v", err)
+		}
+
+		if approvers == nil {
+			continue
+		}
+
+		reviewers := getReviewersForMergeRequest(currentMr)
+		needReviewFromUsers := getUsersNoReviewYet(reviewers, approvers.ApprovedBy)
+
+		for _, username := range needReviewFromUsers {
+			if slice, ok := usersMergeRequests[username]; ok {
+				usersMergeRequests[username] = append(slice, currentMr)
+			} else {
+				usersMergeRequests[username] = []*gitlab.MergeRequest{currentMr}
+			}
+		}
+	}
+	return usersMergeRequests
+}
+
+func getReviewersForMergeRequest(mr *gitlab.MergeRequest) []string {
+	var reviewers []string
+
+	for _, reviewer := range mr.Reviewers {
+		reviewers = append(reviewers, reviewer.Username)
+	}
+
+	return reviewers
+}
+
+func getUsersNoReviewYet(reviewers []string, approvedBy []*gitlab.MergeRequestApproverUser) []string {
+	for i := range approvedBy {
+		reviewers = deleteElementFromSliceIfExists(reviewers, approvedBy[i].User.Username)
+	}
+
+	return reviewers
+}
+
+func deleteElementFromSliceIfExists(slice []string, value string) []string {
+	for i := range slice {
+		if slice[i] == value {
+			slice[i] = slice[len(slice)-1]
+			newSlice := slice[:len(slice)-1]
+			return newSlice
+		}
+	}
+
+	return slice
 }
